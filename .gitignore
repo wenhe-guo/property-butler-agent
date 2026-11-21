@@ -30,3 +30,5 @@ chat_history*.json
 .idea/
 .DS_Store
 Thumbs.db*.bak
+
+*.bak
