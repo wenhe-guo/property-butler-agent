@@ -29,4 +29,4 @@ chat_history*.json
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
+Thumbs.db*.bak
