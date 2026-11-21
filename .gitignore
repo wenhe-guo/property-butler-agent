@@ -1,0 +1,32 @@
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 密钥与本地配置（绝对不能进仓库）
+.env
+*.env
+config/local.py
+
+# 数据库文件（运行时生成）
+*.db
+*.sqlite
+*.sqlite3
+
+# 向量库（体积大，可重建）
+chroma_db*/
+chroma/
+
+# 对话记录
+chat_history*.json
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
