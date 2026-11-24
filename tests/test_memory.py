@@ -7,7 +7,7 @@
 """
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
-from services.llm_service import (
+from services.memory import (
     ChatMemory,
     get_memory,
     reset_session,

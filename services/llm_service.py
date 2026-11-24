@@ -1,33 +1,32 @@
-""" LLM服务模块
-封装通义千问API调用 + Agent串联 + 按会话隔离的对话记忆
+""" LLM服务模块 v3.1
+封装通义千问API调用 + Agent串联 + 工具执行
 
-v3.0 相对 2.0 的三处关键修复：
-1. ChatMemory 不再全局单例，按 session_id 各存一份 —— 业主之间不串上下文
-2. 记忆里存完整消息对象（含带 tool_calls 的 AIMessage）—— 修掉 400 隐患
-3. 裁剪历史按 HumanMessage 边界整轮切 —— 不会把 AIMessage(tool_calls)+ToolMessage 拆开
+v3.1 相对 v3.0 的三处改动：
+1. 记忆管理整体下沉到 services/memory.py —— 本模块只管"调模型"，不再管"记什么"
+   好处：测试导入 memory.py 时不会连带加载 langchain_openai（省掉约 20 秒）
+2. 工具执行改 tool_map.get() —— 模型幻觉出不存在的工具名不会再 KeyError 500
+3. ToolMessage 的 content 加了 str() —— 工具返回非字符串也不会报错
 """
-from typing import Dict, List
-
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from config import QWEN_API_KEY
-
-# ============ System Prompt ============
-
-SYSTEM_PROMPT = """你是"物业智能管家"，一个专业的物业管理AI助手。
-
-## 你的职责
-- 帮助业主查询物业费、报修进度等物业服务
-- 回答小区相关的常见问题
-
-## 你的语气
-- 专业、热情、简洁
-
-## 重要规则
-- 当业主需要查询物业费或报修时，你必须使用工具，不要自己编造数据
-- 不知道的事情就说"我帮您查询一下"
-"""
+from services.tools import (
+    query_property_fee,
+    register_repair,
+    query_repair_status,
+    register_complaint,
+    query_parking_fee,
+    query_announcements,
+)
+# 记忆相关全部从 memory 模块导入（这里同时也做了 re-export，
+# routers/chat.py 里 from services.llm_service import reset_session 依然可用，不用改）
+from services.memory import (
+    ChatMemory,
+    get_memory,
+    reset_session,
+    list_sessions,
+)
 
 # ============ 模型初始化 ============
 
@@ -36,17 +35,7 @@ llm = ChatOpenAI(
     api_key=QWEN_API_KEY,
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     temperature=0.7,
-    max_tokens=1024
-)
-
-# 绑定工具
-from services.tools import (
-    query_property_fee,
-    register_repair,
-    query_repair_status,
-    register_complaint,
-    query_parking_fee,
-    query_announcements
+    max_tokens=1024,
 )
 
 tools = [
@@ -55,7 +44,7 @@ tools = [
     query_repair_status,
     register_complaint,
     query_parking_fee,
-    query_announcements
+    query_announcements,
 ]
 
 llm_with_tools = llm.bind_tools(tools)
@@ -71,76 +60,6 @@ tool_map = {
 
 # 一次对话里最多允许几轮工具调用，防止死循环
 MAX_TOOL_ROUNDS = 5
-
-
-# ============ 会话记忆 ============
-
-class ChatMemory:
-    """单个会话的对话记忆
-
-    跟 2.0 最大的区别：存的是完整消息对象，不是 content 字符串。
-    带 tool_calls 的 AIMessage 原样保存，下一轮发回去才不会 400。
-    """
-
-    def __init__(self, max_turns: int = 10):
-        self.max_turns = max_turns
-        self.messages: List = []
-
-    def add_message(self, message):
-        """直接存完整消息对象（HumanMessage / AIMessage / ToolMessage）"""
-        self.messages.append(message)
-        self._trim()
-
-    def _trim(self):
-        """按 HumanMessage 边界整轮裁剪
-
-        保证「AIMessage(带 tool_calls) + 它后面所有 ToolMessage」这一组
-        永远在同一边，不会被切成两半。
-        """
-        if len(self.messages) <= self.max_turns * 2:
-            return
-
-        # 找出所有 HumanMessage 的位置，作为每一轮的起点
-        turn_starts = [
-            i for i, m in enumerate(self.messages)
-            if isinstance(m, HumanMessage)
-        ]
-
-        if len(turn_starts) <= self.max_turns:
-            return
-
-        # 只保留最后 max_turns 轮
-        cut = turn_starts[-self.max_turns]
-        self.messages = self.messages[cut:]
-
-    def get_all(self) -> List:
-        """完整历史（含 System Prompt）"""
-        return [SystemMessage(content=SYSTEM_PROMPT)] + self.messages
-
-    def clear(self):
-        self.messages = []
-
-
-# 会话池：key 是 session_id，value 是该会话的记忆
-_sessions: Dict[str, ChatMemory] = {}
-
-
-def get_memory(session_id: str) -> ChatMemory:
-    """拿到某个会话的记忆，没有就新建"""
-    if session_id not in _sessions:
-        _sessions[session_id] = ChatMemory()
-    return _sessions[session_id]
-
-
-def reset_session(session_id: str):
-    """清空某个会话的记忆"""
-    if session_id in _sessions:
-        del _sessions[session_id]
-
-
-def list_sessions() -> List[str]:
-    """当前活跃会话列表（调试用）"""
-    return list(_sessions.keys())
 
 
 # ============ 主流程 ============
@@ -171,13 +90,21 @@ def chat_with_llm(user_message: str, session_id: str = "default") -> str:
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            tool_func = tool_map[tool_name]
-            result = tool_func.invoke(tool_args)
+
+            # 用 get 而不是直接索引：模型偶尔会编出不存在的工具名，
+            # 直接索引会 KeyError 把整个请求打成 500
+            tool_func = tool_map.get(tool_name)
+            if tool_func is None:
+                result = f"工具 {tool_name} 不存在，请换个说法帮业主处理"
+            else:
+                try:
+                    result = tool_func.invoke(tool_args)
+                except Exception as e:
+                    result = f"工具 {tool_name} 执行出错：{e}"
+
+            # content 必须是字符串，工具返回 dict/list 时 str() 兜住
             mem.add_message(
-                ToolMessage(content=result, tool_call_id=tool_call["id"])
+                ToolMessage(content=str(result), tool_call_id=tool_call["id"])
             )
 
     return "抱歉，这个问题有点绕，我帮您转人工处理。"
-
-
-# cd "D:\python agent\property-butler-2.0"

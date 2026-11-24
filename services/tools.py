@@ -2,7 +2,7 @@
 工具模块
 物业管家可调用的工具函数，每个工具都带@tool装饰器和docstring描述
 """
-from langchain.tools import tool
+from langchain_core.tools import tool
 import random
 from datetime import datetime
 from services.database import get_conn

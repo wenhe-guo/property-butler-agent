@@ -32,5 +32,4 @@ chat_history*.json
 Thumbs.db
 
 *.bak
-__pycache__/
 .pytest_cache/
